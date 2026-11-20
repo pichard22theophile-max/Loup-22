@@ -52,6 +52,7 @@ button:focus-visible,input:focus-visible{outline:3px solid var(--accent);outline
 .tag.host{background:#3b3220;color:var(--accent)}
 .tag.voted{background:#1d3a2c;color:var(--ok)}
 .tag.role{background:#3a1f22;color:#f1b7b7}
+.tag.mayor{background:#3b3220;color:#f3d48a}
 .kick{min-height:34px;padding:4px 10px;font-size:14px}
 .roles{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .roles label{display:flex;gap:8px;align-items:center;background:#111a2d;border:1px solid var(--line);border-radius:10px;padding:10px;font-size:15px}
@@ -159,6 +160,7 @@ var SUPABASE_KEY = "sb_publishable_lZYZFjBYspM3-GbkfQowHg_6-oJsaHW";
     if(!text || !voiceEnabled() || !window.speechSynthesis) return;
     try{
       var u = new SpeechSynthesisUtterance(text);
+      speechSynthesis.cancel();
       u.lang = "fr-FR"; if(frVoice) u.voice = frVoice; u.rate = 0.86; u.pitch = 0.75;
       speechSynthesis.speak(u);
     }catch(e){}
@@ -208,11 +210,9 @@ var SUPABASE_KEY = "sb_publishable_lZYZFjBYspM3-GbkfQowHg_6-oJsaHW";
       if(g.step==="loups") howl();
     } else if(g.status==="reveal"){
       parts.push("La partie commence. Chacun découvre son rôle en secret sur son téléphone.");
-    } else if(g.status==="vote"){
-      parts.push("Le vote est ouvert. Chacun vote en secret sur son téléphone.");
-    } else if(["day","dusk","hunter","ended"].indexOf(g.status)>=0 && g.announcement){
+    } else if(["day","dusk","hunter","succession","ended","vote","mayor"].indexOf(g.status)>=0 && g.announcement){
       parts.push(g.announcement);
-      if(g.status==="day") parts.push("Débattez librement, puis passez au vote.");
+      if(g.status==="day") parts.push("Vous avez cinq minutes pour débattre.");
     }
     say(parts.join(" "));
   }
@@ -264,16 +264,24 @@ var SUPABASE_KEY = "sb_publishable_lZYZFjBYspM3-GbkfQowHg_6-oJsaHW";
         .on("postgres_changes",{event:"*",schema:"public",table:"lg_secrets",filter:"game_id=eq."+S.gid},scheduleLoad)
         .subscribe();
     }catch(e){}
-    pollTimer = setInterval(load, 4000);
+    pollTimer = setInterval(load, 2000);
     tickTimer = setInterval(function(){
       var g=S.game; if(!g || !g.step_ends_at) return;
-      if(["night","hunter"].indexOf(g.status)<0) return;
+      if(["night","hunter","succession","day","vote","mayor"].indexOf(g.status)<0) return;
       var now=Date.now();
       if(now > new Date(g.step_ends_at).getTime()+800 && now-lastTick > 2500){
         lastTick = now; sb.rpc("lg_tick",{p_game:S.gid}).then(function(){ scheduleLoad(); });
       }
     }, 1000);
   }
+  setInterval(function(){
+    var el=document.getElementById("countdown"), g=S.game;
+    if(!el || !g || ["day","vote","mayor"].indexOf(g.status)<0 || !g.step_ends_at) return;
+    var left=Math.max(0, Math.round((new Date(g.step_ends_at).getTime()-Date.now())/1000));
+    el.textContent=Math.floor(left/60)+":"+String(left%60).padStart(2,"0");
+    el.style.color = left<=60 ? "#f1b7b7" : "";
+    if(g.step!=="dernier_appel" && left<=60 && left>50 && S.warned!==g.step_seq){ S.warned=g.step_seq; say("Plus qu'une minute avant le vote !"); }
+  }, 1000);
   function unwatch(){ if(channel){ try{sb.removeChannel(channel);}catch(e){} channel=null; } clearInterval(pollTimer); clearInterval(tickTimer); }
   function enter(gid){ S.gid=gid; S.sig=null; S.game=null; S.secret=null; S.lastSeq=null; LS.set("lg_gid",gid); watch(); load(); }
   function leave(silent){ unwatch(); S.gid=null; S.game=null; S.players=[]; S.secret=null; LS.del("lg_gid"); if(!silent) toast("Tu as quitté la partie."); render(); }
@@ -289,7 +297,9 @@ var SUPABASE_KEY = "sb_publishable_lZYZFjBYspM3-GbkfQowHg_6-oJsaHW";
     var g=S.game, ph="";
     if(g.status==="night") ph="Nuit "+g.day;
     else if(g.status==="day") ph="Jour "+g.day;
-    else if(g.status==="vote") ph="Vote · Jour "+g.day;
+    else if(g.status==="vote") ph="Jour "+g.day+" · Débat et vote";
+    else if(g.status==="mayor") ph="Élection du maire";
+    else if(g.status==="succession") ph="Succession du maire";
     else if(g.status==="dusk") ph="Crépuscule";
     else if(g.status==="hunter") ph="Le Chasseur";
     else if(g.status==="reveal") ph="Distribution";
@@ -303,6 +313,7 @@ var SUPABASE_KEY = "sb_publishable_lZYZFjBYspM3-GbkfQowHg_6-oJsaHW";
   function playersCard(showVotes){
     var li = S.players.map(function(p){
       var tags='';
+      if(p.is_mayor) tags+='<span class="tag mayor">🏅 Maire</span>';
       if(p.user_id===S.game.host_user) tags+='<span class="tag host">Hôte</span>';
       if(!p.alive && p.revealed_role) tags+='<span class="tag role">'+esc(ROLES[p.revealed_role]?ROLES[p.revealed_role].n:p.revealed_role)+'</span>';
       if(S.game.status==="ended" && p.alive && p.revealed_role) tags+='<span class="tag role">'+esc(ROLES[p.revealed_role].n)+'</span>';
@@ -408,8 +419,8 @@ var SUPABASE_KEY = "sb_publishable_lZYZFjBYspM3-GbkfQowHg_6-oJsaHW";
     var g=S.game, host=isHost(), pr=(S.secret&&S.secret.prompt)||{};
     var body='<div class="card fade"><h2>'+(g.status==="dusk"?"Le soir tombe":"Le matin, jour "+g.day)+'</h2><p class="ann">'+esc(g.announcement||"")+'</p></div>';
     if(g.status==="day"){
-      body+='<div class="card center"><p class="note" style="margin:0">Débattez librement, sans limite de temps.</p>'
-        +(host?'<button type="button" class="btn gold" data-a="openvote">Passer au vote</button>':'<p class="note">L\'hôte ouvrira le vote quand vous serez prêts.</p>')+'</div>';
+      body+='<div class="card center"><p class="note" style="margin:0">Temps restant pour débattre</p><div class="bigcode" id="countdown" style="letter-spacing:.08em">5:00</div><p class="note" style="margin:0">Le vote s\'ouvre tout seul à la fin.</p>'
+        +(host?'<button type="button" class="btn gold" data-a="openvote">Passer au vote maintenant</button>':'<p class="note">L\'hôte ouvrira le vote quand vous serez prêts.</p>')+'</div>';
     } else {
       body+=(host?'<button type="button" class="btn gold" data-a="night">La nuit tombe</button>':'<div class="card center"><p class="note" style="margin:0">L\'hôte lancera la nuit.</p></div>');
     }
@@ -418,24 +429,32 @@ var SUPABASE_KEY = "sb_publishable_lZYZFjBYspM3-GbkfQowHg_6-oJsaHW";
   }
   function vVote(){
     var g=S.game, pr=(S.secret&&S.secret.prompt)||{}, host=isHost(), body='';
+    var meP=mine(), last=g.step==="dernier_appel";
+    body='<div class="card fade"><p class="ann" style="margin:0">'+esc(g.announcement||"")+'</p></div>';
+    if(g.step_ends_at) body+='<div class="card center"><p class="note" style="margin:0">'+(last?'Dernier appel !':(g.status==="mayor"?'Temps pour élire le maire':'Temps pour débattre et voter'))+'</p>'
+      +'<div class="bigcode" id="countdown" style="letter-spacing:.08em'+(last?';color:#f1b7b7':'')+'">…</div>'
+      +'<p class="note" style="margin:0">Si tout le monde a voté avant la fin, le résultat tombe tout de suite.</p></div>';
     if(pr.kind==="vote"){
-      body='<div class="card fade"><p class="title">Qui éliminer ?</p><p class="text">Ton vote est secret.</p><div class="choices">'
+      body+='<div class="card fade">'
+        +(pr.mayor?'<p class="title">Qui sera le maire ?</p><p class="text">Ton vote est secret. Le vote du maire comptera double.</p>'
+                  :'<p class="title">Qui éliminer ?</p><p class="text">Ton vote est secret.'+(meP&&meP.is_mayor?' 🏅 Tu es le maire : ton vote compte double.':'')+'</p>')
+        +'<div class="choices">'
         +(pr.choices||[]).map(function(id){return '<button type="button" data-a="sel" data-id="'+id+'" aria-pressed="'+(S.sel.indexOf(id)>=0)+'">'+esc(pname(id))+'</button>';}).join("")
-        +'</div><button type="button" class="btn gold" data-a="vote"'+(S.sel.length===1?'':' disabled')+'>Voter</button>'
+        +'</div><button type="button" class="btn gold" data-a="vote"'+(S.sel.length===1?'':' disabled')+'>'+(pr.mayor?'Élire':'Voter')+'</button>'
         +'<button type="button" class="btn ghost" data-a="blank">Vote blanc</button></div>';
     } else if(pr.kind==="voted"){
-      body='<div class="card center"><p class="title">Vote enregistré</p><p class="note">En attente des autres joueurs…</p></div>';
+      body+='<div class="card center"><p class="title">Vote enregistré</p><p class="note">Continuez à débattre. Le résultat tombe quand tout le monde a voté ou à la fin du temps.</p></div>';
     } else {
-      body='<div class="card center"><p class="note" style="margin:0">Les vivants votent. Tu es mort : reste silencieux.</p></div>';
+      body+='<div class="card center"><p class="note" style="margin:0">Les vivants débattent et votent. Tu es mort : reste silencieux.</p></div>';
     }
     if(host) body+='<button type="button" class="btn ghost" data-a="closevote">Clore le vote maintenant</button>';
-    return topbar()+body+playersCard(true);
+    return topbar()+changedBanner()+body+(g.compo?'<div class="card"><h2>Rôles en jeu</h2><p class="note" style="margin:0;font-size:15px">'+esc(g.compo)+'</p></div>':'')+playersCard(true);
   }
   function vHunter(){
     var g=S.game, pr=(S.secret&&S.secret.prompt)||{};
     var body='<div class="card"><p class="ann">'+esc(g.announcement||"")+'</p></div>';
     if(pr.kind==="pick") body+='<div class="card">'+vPrompt()+'</div>';
-    else body+='<div class="card center"><p class="note" style="margin:0">Le chasseur choisit sa cible…</p></div>';
+    else body+='<div class="card center"><p class="note" style="margin:0">'+(g.status==="succession"?'Le maire désigne son successeur…':'Le chasseur choisit sa cible…')+'</p></div>';
     return topbar()+body+playersCard(false);
   }
   function vEnded(){
@@ -465,8 +484,8 @@ var SUPABASE_KEY = "sb_publishable_lZYZFjBYspM3-GbkfQowHg_6-oJsaHW";
       else if(st==="reveal") h=vReveal();
       else if(st==="night") h=vNight();
       else if(st==="day"||st==="dusk") h=vDay();
-      else if(st==="vote") h=vVote();
-      else if(st==="hunter") h=vHunter();
+      else if(st==="vote"||st==="mayor") h=vVote();
+      else if(st==="hunter"||st==="succession") h=vHunter();
       else if(st==="ended") h=vEnded();
       else h=vHome();
     }
@@ -577,4 +596,5 @@ var SUPABASE_KEY = "sb_publishable_lZYZFjBYspM3-GbkfQowHg_6-oJsaHW";
 </script>
 </body>
 </html>
+
 
