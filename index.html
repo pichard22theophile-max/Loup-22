@@ -119,12 +119,11 @@ var SUPABASE_KEY = "sb_publishable_lZYZFjBYspM3-GbkfQowHg_6-oJsaHW";
   };
   var SPECIALS = ["voyante","sorciere","cupidon","chasseur","salvateur","petite_fille","ancien","voleur"];
   var STEP_WAKE = {
-    village:"La nuit tombe sur le village. Avant de dormir, chacun désigne en secret, sur son téléphone, celui qu'il soupçonne. Puis tout le monde ferme les yeux.",
     voleur:"Le voleur se réveille. Il peut échanger son rôle avec celui d'un autre joueur.",
     cupidon:"Cupidon se réveille. Il désigne deux amoureux.",
     amoureux:"Les amoureux se réveillent, se reconnaissent en secret sur leur téléphone, puis se rendorment.",
     salvateur:"Le salvateur se réveille. Il choisit qui protéger cette nuit.",
-    loups:"Le loup-garou se réveille et choisit sa victime. La petite fille peut tenter d'espionner.",
+    loups:"Le loup-garou se réveille et choisit sa victime.",
     voyante:"La voyante se réveille. Elle découvre le rôle d'un joueur.",
     sorciere:"La sorcière se réveille. Elle peut utiliser ses potions."
   };
@@ -145,14 +144,22 @@ var SUPABASE_KEY = "sb_publishable_lZYZFjBYspM3-GbkfQowHg_6-oJsaHW";
   /* ---------- Voix ---------- */
   var voiceOn = LS.get("lg_voice", "") ; // "" = pas encore choisi
   var frVoice = null;
-  function pickVoice(){ if(!window.speechSynthesis) return; var vs=speechSynthesis.getVoices(); frVoice = vs.find(function(v){return /^fr(-|_)FR/i.test(v.lang);}) || vs.find(function(v){return /^fr/i.test(v.lang);}) || null; }
+  function pickVoice(){ try{ var vs=speechSynthesis.getVoices().filter(function(v){return /^fr/i.test(v.lang);});
+    // on préfère les voix "améliorées" et graves, plus naturelles que la voix de base
+    function score(v){ var n=v.name||"", s=0;
+      if(/premium|enhanced|amélior|ameliore|natural|neural|naturelle/i.test(n)) s+=10;
+      if(/thomas|daniel|nicolas|henri|paul|jacques|grandpa|grand-père|eddy|reed|rocko/i.test(n)) s+=4;
+      if(/^fr(-|_)FR/i.test(v.lang)) s+=2;
+      if(v.localService) s+=1;
+      return s; }
+    vs.sort(function(a,b){return score(b)-score(a);}); frVoice=vs[0]||null; }catch(e){} }
   if(window.speechSynthesis){ pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
   function voiceEnabled(){ if(voiceOn==="") return isHost(); return voiceOn==="1"; }
   function say(text){
     if(!text || !voiceEnabled() || !window.speechSynthesis) return;
     try{
       var u = new SpeechSynthesisUtterance(text);
-      u.lang = "fr-FR"; if(frVoice) u.voice = frVoice; u.rate = 0.92; u.pitch = 0.85;
+      u.lang = "fr-FR"; if(frVoice) u.voice = frVoice; u.rate = 0.86; u.pitch = 0.75;
       speechSynthesis.speak(u);
     }catch(e){}
   }
@@ -193,6 +200,10 @@ var SUPABASE_KEY = "sb_publishable_lZYZFjBYspM3-GbkfQowHg_6-oJsaHW";
     var g=S.game, parts=[];
     if(prevStatus==="night" && prevStep && STEP_SLEEP[prevStep] && (g.status!=="night" || g.step!==prevStep)) parts.push(STEP_SLEEP[prevStep]);
     if(g.status==="night"){
+      if(prevStatus!=="night"){
+        if(g.day===1 && g.compo) parts.push("Les rôles de cette partie sont : "+g.compo+".");
+        parts.push("La nuit tombe sur le village. Tout le monde ferme les yeux.");
+      }
       if(STEP_WAKE[g.step]) parts.push(STEP_WAKE[g.step]);
       if(g.step==="loups") howl();
     } else if(g.status==="reveal"){
@@ -227,6 +238,11 @@ var SUPABASE_KEY = "sb_publishable_lZYZFjBYspM3-GbkfQowHg_6-oJsaHW";
     S.game = g;
     S.players = (a[1].data||[]).slice().sort(function(x,y){return x.seat-y.seat;});
     var sec = (a[2].data||[])[0] || null;
+    if(sec){
+      var key = g.id+":"+g.round;
+      if(S.roleKey !== key){ S.roleKey = key; S.knownRole = sec.role; S.roleChanged = false; }
+      else if(sec.role !== S.knownRole && g.status !== "night"){ S.roleChanged = true; }
+    }
     var promptChanged = !S.secret || !sec || S.secret.prompt_seq !== sec.prompt_seq;
     S.secret = sec;
     if(promptChanged){ S.sel=[]; S.heal=false; S.kill=false; }
@@ -336,7 +352,7 @@ var SUPABASE_KEY = "sb_publishable_lZYZFjBYspM3-GbkfQowHg_6-oJsaHW";
   function vReveal(){
     var me=mine(), ready=S.players.filter(function(p){return p.ready;}).length;
     var waiting = S.secret && S.secret.prompt && S.secret.prompt.kind==="waiting";
-    return topbar()+'<div class="card">'+roleBlock(S.roleOpen)
+    return topbar()+(S.game.compo?'<div class="card center"><p class="note" style="margin:0">Rôles en jeu : '+esc(S.game.compo)+'</p></div>':'')+'<div class="card">'+roleBlock(S.roleOpen)
       +(waiting?'<p class="note center">Prêts : '+ready+' / '+S.players.length+'. La nuit commencera quand tout le monde aura confirmé.</p>'
                :'<button type="button" class="btn gold" data-a="ready">J\'ai vu mon rôle</button>')+'</div>';
   }
@@ -366,8 +382,13 @@ var SUPABASE_KEY = "sb_publishable_lZYZFjBYspM3-GbkfQowHg_6-oJsaHW";
         if(S.kill) html+='<div class="choices">'+(pr.choices||[]).map(function(id){return '<button type="button" data-a="sel" data-id="'+id+'" aria-pressed="'+(S.sel.indexOf(id)>=0)+'">'+esc(pname(id))+'</button>';}).join("")+'</div>';
       }
       if(!pr.canHeal && !pr.canKill) html+='<p class="note center">Tu as utilisé toutes tes potions.</p>';
-      html+='<button type="button" class="btn gold" data-a="witch"'+(S.kill&&S.sel.length!==1?' disabled':'')+'>Valider</button></div>';
+      html+='<button type="button" class="btn gold" data-a="witch"'+(S.kill&&S.sel.length!==1?' disabled':'')+'>Valider</button>'
+        +'<button type="button" class="btn ghost" data-a="witchnone">Ne rien faire</button></div>';
       return html;
+    }
+    if(k==="notice"){
+      return '<div class="fade center"><p class="title" style="font-size:20px">Notification</p><p class="text">'+esc(pr.text)+'</p>'
+        +'<button type="button" class="btn gold" data-a="ok">J\'ai compris</button></div>';
     }
     if(k==="dead"){
       return '<div class="sleep fade"><span class="moon small" style="filter:grayscale(1)"></span><p class="title" style="margin-top:12px">Tu es mort</p><p>Reste silencieux et regarde la suite. Ne révèle rien !</p></div>';
@@ -375,6 +396,14 @@ var SUPABASE_KEY = "sb_publishable_lZYZFjBYspM3-GbkfQowHg_6-oJsaHW";
     return '<div class="sleep fade"><span class="moon"></span><p class="title" style="margin-top:16px">La nuit est tombée</p><p>Garde les yeux fermés. La voix te dira quand te réveiller.</p></div>';
   }
   function vNight(){ return topbar()+'<div class="card stage">'+vPrompt()+'</div>'; }
+  function changedBanner(){
+    var pr=(S.secret&&S.secret.prompt)||{};
+    if(pr.kind==="notice") return '<div class="card fade" style="border-color:#c9a45c">'+vPrompt()+'</div>';
+    if(!S.roleChanged || !S.secret) return '';
+    return '<div class="card center fade" style="border-color:#c9a45c"><p class="title" style="font-size:20px">Ton rôle a changé cette nuit</p>'
+      +'<p class="note">Le Voleur a pris ton rôle. Regarde ton nouveau rôle discrètement.</p>'
+      +'<button type="button" class="btn gold" data-a="seechanged">Voir mon nouveau rôle</button></div>';
+  }
   function vDay(){
     var g=S.game, host=isHost(), pr=(S.secret&&S.secret.prompt)||{};
     var body='<div class="card fade"><h2>'+(g.status==="dusk"?"Le soir tombe":"Le matin, jour "+g.day)+'</h2><p class="ann">'+esc(g.announcement||"")+'</p></div>';
@@ -385,7 +414,7 @@ var SUPABASE_KEY = "sb_publishable_lZYZFjBYspM3-GbkfQowHg_6-oJsaHW";
       body+=(host?'<button type="button" class="btn gold" data-a="night">La nuit tombe</button>':'<div class="card center"><p class="note" style="margin:0">L\'hôte lancera la nuit.</p></div>');
     }
     if(pr.kind==="dead") body='<div class="card center"><p class="note" style="margin:0">Tu es mort : reste silencieux.</p></div>'+body;
-    return topbar()+body+playersCard(false);
+    return topbar()+changedBanner()+body+(g.compo?'<div class="card"><h2>Rôles en jeu</h2><p class="note" style="margin:0;font-size:15px">'+esc(g.compo)+'</p></div>':'')+playersCard(false);
   }
   function vVote(){
     var g=S.game, pr=(S.secret&&S.secret.prompt)||{}, host=isHost(), body='';
@@ -483,6 +512,7 @@ var SUPABASE_KEY = "sb_publishable_lZYZFjBYspM3-GbkfQowHg_6-oJsaHW";
       else if(a==="leave"){ leave(false); }
       else if(a==="flip"){ S.roleOpen=!S.roleOpen; render(); }
       else if(a==="role"){ S.sheet=true; S.roleOpen=false; render(); }
+      else if(a==="seechanged"){ S.knownRole=S.secret.role; S.roleChanged=false; S.sheet=true; S.roleOpen=false; render(); }
       else if(a==="closesheet"){ if(e.target.closest("[data-stop]") && b.classList.contains("sheet")) return; S.sheet=false; S.roleOpen=false; render(); }
       else if(a==="ready"){ S.roleOpen=false; await rpc("lg_ready",{p_game:S.gid}); scheduleLoad(); }
       else if(a==="sel"){
@@ -494,6 +524,7 @@ var SUPABASE_KEY = "sb_publishable_lZYZFjBYspM3-GbkfQowHg_6-oJsaHW";
       else if(a==="skip"){ await act([]); }
       else if(a==="ok"||a==="spy"){ await act([]); }
       else if(a==="witch"){ var c=[]; if(S.heal) c.push("heal"); if(S.kill) c.push("kill"); await act(S.kill?S.sel.slice():[], c.join("+")||"none"); }
+      else if(a==="witchnone"){ await act([], "none"); }
       else if(a==="vote"){ await act(S.sel.slice()); }
       else if(a==="blank"){ await act([], "blank"); }
       else if(a==="openvote"){ await rpc("lg_open_vote",{p_game:S.gid}); scheduleLoad(); }
@@ -546,3 +577,4 @@ var SUPABASE_KEY = "sb_publishable_lZYZFjBYspM3-GbkfQowHg_6-oJsaHW";
 </script>
 </body>
 </html>
+
